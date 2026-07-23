@@ -10,6 +10,11 @@ const API_ROOT = 'https://bot.143259.xyz';
 
 const DB_FILE = path.join(__dirname, 'bots.json');
 
+// 休眠配置
+const IDLE_TIMEOUT_MS = 10 * 60 * 1000;   // 闲置 10 分钟后休眠
+const WAKEUP_INTERVAL_MS = 60 * 1000;     // 每 60 秒探测一次休眠中的 Bot
+const POLL_TIMEOUT = 60;                   // 长轮询挂起时间（秒）
+
 // ---------------- 数据存储（JSON 文件） ----------------
 const Store = {
   load() {
@@ -56,7 +61,10 @@ const Store = {
 // ---------------- Bot 实例管理器 ----------------
 class BotManager {
   constructor() {
-    this.instances = new Map();
+    this.instances = new Map();   // botId -> { bot, username, token, ownerId, lastActivity, idleTimer }
+    this.sleeping = new Set();    // 已休眠的 botId
+    this.wakeupTimer = null;
+    this.idleCheckTimer = null;
   }
 
   async createBot(token, ownerId) {
@@ -68,23 +76,32 @@ class BotManager {
     if (this.instances.has(botId)) {
       throw new Error('Bot @' + username + ' 已在运行中');
     }
+    if (this.sleeping.has(botId)) {
+      this.sleeping.delete(botId);
+    }
 
     const bot = new Bot(token, { client: { apiRoot: API_ROOT } });
     this.registerHandlers(bot, botId, ownerId);
 
+    const self = this;
+    const instance = {
+      bot: bot,
+      username: username,
+      token: token,
+      ownerId: ownerId,
+      lastActivity: Date.now(),
+      idleTimer: null
+    };
+
     bot.start({
-      timeout: 50,
+      timeout: POLL_TIMEOUT,
       onStart: function () {
         console.log('[@' + username + '] long polling started');
       }
     });
 
-    this.instances.set(botId, {
-      bot: bot,
-      username: username,
-      token: token,
-      ownerId: ownerId
-    });
+    this.instances.set(botId, instance);
+    this.resetIdleTimer(botId);
 
     Store.addBot({
       bot_id: botId,
@@ -95,11 +112,13 @@ class BotManager {
       status: 'running'
     });
 
+    // 启动守护任务（如果还没启动）
+    this.startDaemonTasks();
+
     return { botId: botId, username: username };
   }
 
   registerHandlers(bot, botId, ownerId) {
-    // 每个 Bot 独立的键值存储（话题群设置、用户-话题映射）
     const kv = new Map(Object.entries(Store.getKV(botId)));
 
     function persistKV() {
@@ -112,14 +131,30 @@ class BotManager {
       return ctx.from && ctx.from.id.toString() === ownerId;
     }
 
+    // 每次收到消息都刷新活动时间（用于休眠判断）
+    const self = this;
+    bot.use(async function (ctx, next) {
+      const inst = self.instances.get(botId);
+      if (inst) {
+        inst.lastActivity = Date.now();
+        self.resetIdleTimer(botId);
+      }
+      await next();
+    });
+
     bot.command('start', async function (ctx) {
       if (ctx.chat.type !== 'private') return;
       if (isAdmin(ctx)) {
         await ctx.reply(
-          '✅ 双向私聊机器人已启动\n\n' +
-          '管理命令：\n' +
-          '/setchat <群ID> - 设置话题群\n' +
-          '/topicgroup - 查看当前话题群\n' +
+          '✅ 双向私聊机器人已启动
+
+' +
+          '管理命令：
+' +
+          '/setchat <群ID> - 设置话题群
+' +
+          '/topicgroup - 查看当前话题群
+' +
           '/cleartopicgroup - 清除话题群设置'
         );
       } else {
@@ -136,7 +171,8 @@ class BotManager {
       if (!isAdmin(ctx)) return;
       const groupId = ctx.match ? ctx.match.trim() : '';
       if (!groupId || groupId.indexOf('-100') !== 0) {
-        await ctx.reply('⚠️ 用法：/setchat -100xxxxxxxxx\n群 ID 必须以 -100 开头，且群已开启话题功能。');
+        await ctx.reply('⚠️ 用法：/setchat -100xxxxxxxxx
+群 ID 必须以 -100 开头，且群已开启话题功能。');
         return;
       }
       kv.set('topic_group', groupId);
@@ -163,7 +199,6 @@ class BotManager {
       const fromId = ctx.from.id.toString();
       if (msg.text && msg.text.indexOf('/') === 0) return;
 
-      // 情况一：管理员在话题群中发言 → 转发给对应用户
       if (isAdmin(ctx) && ctx.chat.type === 'supergroup' && msg.message_thread_id) {
         const topicId = msg.message_thread_id.toString();
         const userChatId = kv.get('topic:' + topicId);
@@ -173,7 +208,6 @@ class BotManager {
         return;
       }
 
-      // 情况二：普通用户私聊 → 转发到话题群
       if (ctx.chat.type === 'private' && !isAdmin(ctx)) {
         const topicGroup = kv.get('topic_group');
         if (!topicGroup) return;
@@ -202,24 +236,112 @@ class BotManager {
     });
   }
 
+  // ---------- 休眠与唤醒 ----------
+  resetIdleTimer(botId) {
+    const inst = this.instances.get(botId);
+    if (!inst) return;
+
+    if (inst.idleTimer) {
+      clearTimeout(inst.idleTimer);
+    }
+
+    const self = this;
+    inst.idleTimer = setTimeout(function () {
+      self.sleepBot(botId);
+    }, IDLE_TIMEOUT_MS);
+  }
+
+  async sleepBot(botId) {
+    const inst = this.instances.get(botId);
+    if (!inst) return;
+
+    console.log('[@' + inst.username + '] 闲置超时，进入休眠');
+    try {
+      await inst.bot.stop();
+    } catch (e) {
+      // 忽略停止时的错误
+    }
+    this.instances.delete(botId);
+    this.sleeping.add(botId);
+  }
+
+  async wakeBot(botId) {
+    const inst = this.instances.get(botId);
+    if (inst) return; // 已在运行
+
+    const data = Store.listBots().find(function (b) { return b.bot_id === botId; });
+    if (!data) return;
+
+    console.log('[@' + data.username + '] 检测到新消息，自动唤醒');
+    try {
+      await this.createBot(data.token, data.owner_id);
+      this.sleeping.delete(botId);
+    } catch (e) {
+      console.error('[@' + data.username + '] 唤醒失败: ' + e.message);
+    }
+  }
+
+  startDaemonTasks() {
+    const self = this;
+
+    // 闲置检测：每 60 秒扫一次
+    if (!this.idleCheckTimer) {
+      this.idleCheckTimer = setInterval(function () {
+        const now = Date.now();
+        self.instances.forEach(function (inst, botId) {
+          if (now - inst.lastActivity > IDLE_TIMEOUT_MS) {
+            self.sleepBot(botId);
+          }
+        });
+      }, 60 * 1000);
+    }
+
+    // 唤醒探测：每 60 秒对所有休眠 Bot 探测一次 pending updates
+    if (!this.wakeupTimer) {
+      this.wakeupTimer = setInterval(async function () {
+        if (self.sleeping.size === 0) return;
+
+        for (const botId of self.sleeping) {
+          const data = Store.listBots().find(function (b) { return b.bot_id === botId; });
+          if (!data) {
+            self.sleeping.delete(botId);
+            continue;
+          }
+          try {
+            const testBot = new Bot(data.token, { client: { apiRoot: API_ROOT } });
+            const updates = await testBot.api.getUpdates({ timeout: 0, limit: 1 });
+            if (updates && updates.length > 0) {
+              await self.wakeBot(botId);
+            }
+          } catch (e) {
+            console.error('[@' + data.username + '] 探测失败: ' + e.message);
+          }
+        }
+      }, WAKEUP_INTERVAL_MS);
+    }
+  }
+
   async deleteBot(botId) {
-    const ins = this.instances.get(botId);
-    if (ins) {
-      try { await ins.bot.stop(); } catch (e) { }
+    const inst = this.instances.get(botId);
+    if (inst) {
+      if (inst.idleTimer) clearTimeout(inst.idleTimer);
+      try { await inst.bot.stop(); } catch (e) { }
       this.instances.delete(botId);
     }
+    this.sleeping.delete(botId);
     Store.removeBot(botId);
   }
 
   getStats() {
     return {
-      total: this.instances.size,
-      instances: Array.from(this.instances.entries()).map(function (entry) {
-        return {
-          botId: entry[0],
-          username: entry[1].username,
-          ownerId: entry[1].ownerId
-        };
+      running: this.instances.size,
+      sleeping: this.sleeping.size,
+      runningList: Array.from(this.instances.entries()).map(function (e) {
+        return { botId: e[0], username: e[1].username, lastActivity: e[1].lastActivity };
+      }),
+      sleepingList: Array.from(this.sleeping).map(function (botId) {
+        const d = Store.listBots().find(function (b) { return b.bot_id === botId; });
+        return { botId: botId, username: d ? d.username : 'unknown' };
       })
     };
   }
@@ -270,7 +392,6 @@ async function forwardToTopic(bot, groupId, topicId, msg) {
 async function main() {
   const manager = new BotManager();
 
-  // 重启后自动恢复所有已创建的 Bot
   const existing = Store.listBots();
   console.log('正在恢复 ' + existing.length + ' 个已有 Bot...');
   for (let i = 0; i < existing.length; i++) {
@@ -292,42 +413,87 @@ async function main() {
   masterBot.command('start', async function (ctx) {
     if (isMasterAdmin(ctx)) {
       await ctx.reply(
-        '🤖 TGBOT Master 管理面板\n\n' +
-        '开放功能（所有人可用）：\n' +
-        '/create <BotToken> - 一键创建你自己的双向私聊机器人\n\n' +
-        '管理员功能：\n' +
-        '/list - 查看所有 Bot\n' +
-        '/delete <botId> - 删除 Bot\n' +
+        '🤖 TGBOT Master 管理面板
+
+' +
+        '开放功能（所有人可用）：
+' +
+        '/create <BotToken> - 一键创建你自己的双向私聊机器人
+
+' +
+        '管理员功能：
+' +
+        '/list - 查看所有 Bot
+' +
+        '/delete <botId> - 删除 Bot
+' +
+        '/sleep <botId> - 手动休眠 Bot
+' +
+        '/wake <botId> - 手动唤醒 Bot
+' +
         '/stats - 查看服务器状态'
       );
     } else {
       await ctx.reply(
-        '👋 欢迎使用机器人托管平台！\n\n' +
-        '发送 /create 加上你的 Bot Token，即可一键创建属于你自己的双向私聊机器人。\n\n' +
-        '例如：\n/create 123456:ABCdef...\n\n' +
+        '👋 欢迎使用机器人托管平台！
+
+' +
+        '发送 /create 加上你的 Bot Token，即可一键创建属于你自己的双向私聊机器人。
+
+' +
+        '例如：
+/create 123456:ABCdef...
+
+' +
         'Token 可以在 @BotFather 处免费申请。'
       );
     }
   });
 
-  // 所有用户都可以创建自己的 Bot，创建者自动成为该 Bot 的管理员
   masterBot.command('create', async function (ctx) {
     const token = ctx.match ? ctx.match.trim() : '';
     if (!token || token.indexOf(':') === -1) {
-      await ctx.reply('⚠️ 用法：/create <BotToken>\n例如：/create 123456:ABCdef...');
+      await ctx.reply('⚠️ 用法：/create <BotToken>
+例如：/create 123456:ABCdef...');
       return;
     }
+
+    // 每人最多 3 个
+    const myBots = Store.listBots().filter(function (b) {
+      return b.owner_id === ctx.from.id.toString();
+    });
+    if (myBots.length >= 3) {
+      await ctx.reply('⚠️ 每人最多创建 3 个机器人，你已达上限。');
+      return;
+    }
+
+    // 平台总容量上限
+    if (Store.listBots().length >= 50) {
+      await ctx.reply('⚠️ 平台已达容量上限，请稍后再试或联系管理员。');
+      return;
+    }
+
     await ctx.reply('🔄 正在验证 Token 并创建机器人，请稍候...');
     try {
       const result = await manager.createBot(token, ctx.from.id.toString());
       await ctx.reply(
-        '🎉 机器人创建成功！\n\n' +
-        '🤖 @' + result.username + '（ID: ' + result.botId + '）\n\n' +
-        '接下来请完成配置：\n' +
-        '1. 创建一个超级群组，并在群设置中开启「话题」功能\n' +
-        '2. 将 @' + result.username + ' 拉入群组并设为管理员\n' +
-        '3. 私聊 @' + result.username + ' 发送：/setchat 群ID\n' +
-        '   （群 ID 以 -100 开头）\n\n' +
+        '🎉 机器人创建成功！
+
+' +
+        '🤖 @' + result.username + '（ID: ' + result.botId + '）
+
+' +
+        '接下来请完成配置：
+' +
+        '1. 创建一个超级群组，并在群设置中开启「话题」功能
+' +
+        '2. 将 @' + result.username + ' 拉入群组并设为管理员
+' +
+        '3. 私聊 @' + result.username + ' 发送：/setchat 群ID
+' +
+        '   （群 ID 以 -100 开头）
+
+' +
         '完成后，任何人私聊你的机器人，消息都会出现在群组对应的话题里。'
       );
     } catch (error) {
@@ -342,13 +508,20 @@ async function main() {
       await ctx.reply('📭 尚未创建任何 Bot');
       return;
     }
-    let msg = '📋 已创建的 Bot（共 ' + bots.length + ' 个）：\n\n';
+    let msg = '📋 已创建的 Bot（共 ' + bots.length + ' 个）：
+
+';
     for (let i = 0; i < bots.length; i++) {
       const b = bots[i];
-      msg += '🤖 @' + b.username + '\n';
-      msg += '  ID: ' + b.bot_id + '\n';
-      msg += '  创建者: ' + b.owner_id + '\n';
-      msg += '  创建时间: ' + b.created_at + '\n\n';
+      msg += '🤖 @' + b.username + '
+';
+      msg += '  ID: ' + b.bot_id + '
+';
+      msg += '  创建者: ' + b.owner_id + '
+';
+      msg += '  创建时间: ' + b.created_at + '
+
+';
     }
     await ctx.reply(msg);
   });
@@ -368,16 +541,45 @@ async function main() {
     }
   });
 
+  masterBot.command('sleep', async function (ctx) {
+    if (!isMasterAdmin(ctx)) return;
+    const botId = ctx.match ? ctx.match.trim() : '';
+    if (!botId) {
+      await ctx.reply('⚠️ 用法：/sleep <botId>');
+      return;
+    }
+    await manager.sleepBot(botId);
+    await ctx.reply('💤 Bot ' + botId + ' 已休眠，下次有消息时自动唤醒');
+  });
+
+  masterBot.command('wake', async function (ctx) {
+    if (!isMasterAdmin(ctx)) return;
+    const botId = ctx.match ? ctx.match.trim() : '';
+    if (!botId) {
+      await ctx.reply('⚠️ 用法：/wake <botId>');
+      return;
+    }
+    await manager.wakeBot(botId);
+    await ctx.reply('⏰ Bot ' + botId + ' 已唤醒');
+  });
+
   masterBot.command('stats', async function (ctx) {
     if (!isMasterAdmin(ctx)) return;
     const stats = manager.getStats();
     const mem = process.memoryUsage();
     const cpu = process.cpuUsage();
     await ctx.reply(
-      '📊 服务器状态\n\n' +
-      '🤖 运行中 Bot: ' + stats.total + ' 个\n' +
-      '💾 内存占用: ' + (mem.rss / 1024 / 1024).toFixed(1) + ' MB\n' +
-      '🖥 CPU 用户时间: ' + (cpu.user / 1000000).toFixed(2) + ' s\n' +
+      '📊 服务器状态
+
+' +
+      '🟢 运行中 Bot: ' + stats.running + ' 个
+' +
+      '💤 休眠中 Bot: ' + stats.sleeping + ' 个
+' +
+      '💾 内存占用: ' + (mem.rss / 1024 / 1024).toFixed(1) + ' MB
+' +
+      '🖥 CPU 用户时间: ' + (cpu.user / 1000000).toFixed(2) + ' s
+' +
       '🖥 CPU 系统时间: ' + (cpu.system / 1000000).toFixed(2) + ' s'
     );
   });
