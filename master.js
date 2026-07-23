@@ -2,17 +2,18 @@ const { Bot, InlineKeyboard } = require('grammy');
 const fs = require('fs');
 const path = require('path');
 
-// ========== 配置区（在服务器上用 sed 修改，不要提交真实值）==========
-const MASTER_TOKEN = '8999546677:AAH2SEcne9yC0R4zsWmg4B_91pT5MkdExVI';
-const ADMIN_ID = '7027439863';
+// ========== 配置区（下载后在服务器上修改，勿提交真实值）==========
+const MASTER_TOKEN = 'PASTE_YOUR_MASTER_BOT_TOKEN_HERE';
+const ADMIN_ID = 'PASTE_YOUR_TELEGRAM_USER_ID_HERE';
 const API_ROOT = 'https://bot.143259.xyz';
-// ===================================================================
+// ==============================================================
 
 const DB_FILE = path.join(__dirname, 'bots.json');
 
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const WAKEUP_INTERVAL_MS = 60 * 1000;
 const POLL_TIMEOUT = 60;
+const BROADCAST_RATE_LIMIT = 30;
 
 // ---------------- 数据存储 ----------------
 const Store = {
@@ -53,7 +54,6 @@ const Store = {
     data.kv[botId] = kvObj;
     this.save(data);
   },
-  // ---- 全局封禁列表 ----
   getBanlist() {
     const data = this.load();
     return data.banlist || [];
@@ -61,7 +61,7 @@ const Store = {
   addToBanlist(userId) {
     const data = this.load();
     if (!data.banlist) data.banlist = [];
-    if (!data.banlist.includes(userId)) {
+    if (data.banlist.indexOf(userId) === -1) {
       data.banlist.push(userId);
       this.save(data);
     }
@@ -72,15 +72,14 @@ const Store = {
     data.banlist = data.banlist.filter(function (id) { return id !== userId; });
     this.save(data);
   },
-  // ---- 每个 Bot 的独立设置 ----
   getBotSettings(botId) {
     const data = this.load();
     if (!data.botSettings) data.botSettings = {};
     if (!data.botSettings[botId]) {
       data.botSettings[botId] = {
-        useGlobalBan: true,     // 联合封禁，默认开
-        useCaptcha: false,       // 人机验证，默认关
-        verifiedUsers: []        // 已通过人机验证的用户
+        useGlobalBan: true,
+        useCaptcha: false,
+        verifiedUsers: []
       };
     }
     return data.botSettings[botId];
@@ -90,8 +89,37 @@ const Store = {
     if (!data.botSettings) data.botSettings = {};
     data.botSettings[botId] = settings;
     this.save(data);
+  },
+  getUsersForBot(botId) {
+    const kv = this.getKV(botId);
+    const users = [];
+    for (const key in kv) {
+      if (key.indexOf('user:') === 0) {
+        users.push(key.replace('user:', ''));
+      }
+    }
+    return users;
   }
 };
+
+// ---------------- 面板 ----------------
+function buildPanelText(settings) {
+  const banLine = settings.useGlobalBan ? '✅ 已开启' : '❌ 已关闭';
+  const captchaLine = settings.useCaptcha ? '✅ 已开启' : '❌ 已关闭';
+  return '⚙️ Bot 设置面板\n\n' +
+    '🛡 联合封禁：' + banLine + '\n' +
+    '🤖 人机验证：' + captchaLine + '\n\n' +
+    '点击下方按钮切换开关';
+}
+
+function buildPanelKeyboard(settings) {
+  const banStatus = settings.useGlobalBan ? '✅' : '❌';
+  const captchaStatus = settings.useCaptcha ? '✅' : '❌';
+  return new InlineKeyboard()
+    .text('🛡 联合封禁：' + banStatus, 'toggle_ban').row()
+    .text('🤖 人机验证：' + captchaStatus, 'toggle_captcha').row()
+    .text('📢 广播用法', 'show_broadcast');
+}
 
 // ---------------- Bot 实例管理器 ----------------
 class BotManager {
@@ -109,13 +137,15 @@ class BotManager {
     const username = me.username;
 
     if (this.instances.has(botId)) throw new Error('Bot @' + username + ' 已在运行中');
-    if (this.sleeping.has(botId)) this.sleeping.delete(botId);
+    this.sleeping.delete(botId);
 
     const bot = new Bot(token, { client: { apiRoot: API_ROOT } });
     this.registerHandlers(bot, botId, ownerId);
 
-    const self = this;
-    const instance = { bot: bot, username: username, token: token, ownerId: ownerId, lastActivity: Date.now(), idleTimer: null };
+    const instance = {
+      bot: bot, username: username, token: token,
+      ownerId: ownerId, lastActivity: Date.now(), idleTimer: null
+    };
 
     bot.start({
       timeout: POLL_TIMEOUT,
@@ -125,7 +155,10 @@ class BotManager {
     this.instances.set(botId, instance);
     this.resetIdleTimer(botId);
 
-    Store.addBot({ bot_id: botId, username: username, token: token, owner_id: ownerId, created_at: new Date().toISOString(), status: 'running' });
+    Store.addBot({
+      bot_id: botId, username: username, token: token,
+      owner_id: ownerId, created_at: new Date().toISOString(), status: 'running'
+    });
     this.startDaemonTasks();
 
     return { botId: botId, username: username };
@@ -133,7 +166,8 @@ class BotManager {
 
   registerHandlers(bot, botId, ownerId) {
     const kv = new Map(Object.entries(Store.getKV(botId)));
-    const settings = Store.getBotSettings(botId); // 引用，改动直接生效
+    const settings = Store.getBotSettings(botId);
+    const self = this;
 
     function persistKV() {
       const obj = {};
@@ -149,50 +183,28 @@ class BotManager {
       return ctx.from && ctx.from.id.toString() === ownerId;
     }
 
-    const self = this;
-
-    // 中间件：刷新活动时间
+    // 活动追踪中间件
     bot.use(async function (ctx, next) {
       const inst = self.instances.get(botId);
-      if (inst) { inst.lastActivity = Date.now(); self.resetIdleTimer(botId); }
-      await next();
-    });
-
-    // ---- /panel 命令：打开设置面板 ----
-    bot.command('panel', async function (ctx) {
-      if (!isAdmin(ctx)) return;
-      if (ctx.chat.type !== 'private') return;
-      await sendPanel(ctx, settings);
-    });
-
-    // ---- 面板按钮回调 ----
-    bot.on('callback_query:data', async function (ctx) {
-      const data = ctx.callbackQuery.data;
-      if (!isAdmin(ctx)) return;
-
-      if (data === 'toggle_ban') {
-        settings.useGlobalBan = !settings.useGlobalBan;
-        persistSettings();
-        await ctx.answerCallbackQuery({ text: '联合封禁已' + (settings.useGlobalBan ? '开启' : '关闭') });
-        await sendPanel(ctx, settings, true);
-      } else if (data === 'toggle_captcha') {
-        settings.useCaptcha = !settings.useCaptcha;
-        persistSettings();
-        await ctx.answerCallbackQuery({ text: '人机验证已' + (settings.useCaptcha ? '开启' : '关闭') });
-        await sendPanel(ctx, settings, true);
+      if (inst) {
+        inst.lastActivity = Date.now();
+        self.resetIdleTimer(botId);
       }
+      await next();
     });
 
     bot.command('start', async function (ctx) {
       if (ctx.chat.type !== 'private') return;
       if (isAdmin(ctx)) {
-        await ctx.reply('✅ 双向私聊机器人已启动
-
-管理命令：
-/setchat <群ID> - 设置话题群
-/topicgroup - 查看话题群
-/cleartopicgroup - 清除话题群
-/panel - 打开设置面板（联合封禁 / 人机验证）');
+        await ctx.reply(
+          '✅ 双向私聊机器人已启动\n\n' +
+          '管理命令：\n' +
+          '/setchat <群ID> - 设置话题群\n' +
+          '/topicgroup - 查看话题群\n' +
+          '/cleartopicgroup - 清除话题群\n' +
+          '/panel - 打开设置面板\n' +
+          '/mybroadcast <消息> - 广播给你的所有用户'
+        );
       } else {
         const tg = kv.get('topic_group');
         if (tg) {
@@ -203,11 +215,17 @@ class BotManager {
       }
     });
 
+    bot.command('panel', async function (ctx) {
+      if (!isAdmin(ctx)) return;
+      if (ctx.chat.type !== 'private') return;
+      await ctx.reply(buildPanelText(settings), { reply_markup: buildPanelKeyboard(settings) });
+    });
+
     bot.command('setchat', async function (ctx) {
       if (!isAdmin(ctx)) return;
       const groupId = ctx.match ? ctx.match.trim() : '';
       if (!groupId || groupId.indexOf('-100') !== 0) {
-        await ctx.reply('⚠️ 用法：/setchat -100xxxxxxxxx');
+        await ctx.reply('⚠️ 用法：/setchat -100xxxxxxxxx\n群 ID 必须以 -100 开头，且群已开启话题功能。');
         return;
       }
       kv.set('topic_group', groupId);
@@ -228,17 +246,60 @@ class BotManager {
       await ctx.reply('✅ 话题群设置已清除');
     });
 
-    // ---- 消息处理 ----
+    bot.command('mybroadcast', async function (ctx) {
+      if (!isAdmin(ctx)) return;
+      const message = ctx.match ? ctx.match.trim() : '';
+      if (!message) {
+        await ctx.reply('⚠️ 用法：/mybroadcast <消息内容>\n例如：/mybroadcast 今晚 8 点系统维护，请知悉。');
+        return;
+      }
+
+      const users = [];
+      kv.forEach(function (value, key) {
+        if (key.indexOf('user:') === 0) users.push(key.replace('user:', ''));
+      });
+
+      if (users.length === 0) {
+        await ctx.reply('📭 还没有用户给你的 Bot 发过消息，无法广播。');
+        return;
+      }
+
+      await ctx.reply('🔄 开始广播给 ' + users.length + ' 个用户，请稍候...');
+
+      let success = 0, failed = 0, skipped = 0;
+      const banlist = Store.getBanlist();
+
+      for (let i = 0; i < users.length; i++) {
+        const userId = users[i];
+        if (settings.useGlobalBan && banlist.indexOf(userId) !== -1) {
+          skipped++;
+          continue;
+        }
+        try {
+          await bot.api.sendMessage(userId, message);
+          success++;
+        } catch (e) {
+          failed++;
+        }
+        if (i % BROADCAST_RATE_LIMIT === BROADCAST_RATE_LIMIT - 1) {
+          await new Promise(function (resolve) { setTimeout(resolve, 1000); });
+        }
+      }
+
+      await ctx.reply('✅ 广播完成\n\n📤 成功: ' + success + '\n❌ 失败: ' + failed + '\n⏭ 跳过(已封禁): ' + skipped);
+    });
+
+    // 消息转发
     bot.on('message', async function (ctx) {
       const msg = ctx.message;
       if (!ctx.from) return;
       const fromId = ctx.from.id.toString();
       if (msg.text && msg.text.indexOf('/') === 0) return;
 
-      // 检查全局封禁
-      if (settings.useGlobalBan && Store.getBanlist().includes(fromId)) {
+      // 联合封禁检查
+      if (settings.useGlobalBan && Store.getBanlist().indexOf(fromId) !== -1) {
         console.log('[' + botId + '] 已拦截封禁用户 ' + fromId);
-        return; // 静默丢弃
+        return;
       }
 
       // 管理员在话题群回复 → 转发给用户
@@ -249,19 +310,15 @@ class BotManager {
         return;
       }
 
-      // 普通用户私聊 → 人机验证 → 转发到话题群
+      // 用户私聊 → 人机验证 → 转发到话题群
       if (ctx.chat.type === 'private' && !isAdmin(ctx)) {
         const topicGroup = kv.get('topic_group');
         if (!topicGroup) return;
 
-        // ---- 人机验证 ----
-        if (settings.useCaptcha) {
-          if (!settings.verifiedUsers.includes(fromId)) {
-            // 未验证，发验证按钮
-            const keyboard = new InlineKeyboard().text('✅ 我不是机器人', 'captcha_verify');
-            await ctx.reply('请完成人机验证后才能发送消息：', { reply_markup: keyboard });
-            return;
-          }
+        if (settings.useCaptcha && settings.verifiedUsers.indexOf(fromId) === -1) {
+          const keyboard = new InlineKeyboard().text('✅ 我不是机器人', 'captcha_verify');
+          await ctx.reply('请完成人机验证后才能发送消息：', { reply_markup: keyboard });
+          return;
         }
 
         let topicId = kv.get('user:' + fromId);
@@ -283,20 +340,50 @@ class BotManager {
       }
     });
 
-    // ---- 人机验证按钮回调 ----
+    // 所有按钮回调统一处理（合并为一个，避免中间件互相拦截）
     bot.on('callback_query:data', async function (ctx) {
       const data = ctx.callbackQuery.data;
-      if (data !== 'captcha_verify') return;
 
-      const fromId = ctx.from.id.toString();
-      if (!settings.verifiedUsers.includes(fromId)) {
-        settings.verifiedUsers.push(fromId);
-        persistSettings();
+      // 人机验证按钮（任何用户可点）
+      if (data === 'captcha_verify') {
+        const fromId = ctx.from.id.toString();
+        if (settings.verifiedUsers.indexOf(fromId) === -1) {
+          settings.verifiedUsers.push(fromId);
+          persistSettings();
+        }
+        await ctx.answerCallbackQuery({ text: '✅ 验证通过！' });
+        try {
+          await ctx.editMessageText('✅ 人机验证通过，现在可以正常发送消息了。');
+        } catch (e) { }
+        return;
       }
-      await ctx.answerCallbackQuery({ text: '✅ 验证通过！' });
-      try {
-        await ctx.editMessageText('✅ 人机验证通过，现在可以正常发送消息了。');
-      } catch (e) { }
+
+      // 面板按钮（仅创建者可点）
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: '只有机器人管理员可以操作', show_alert: true });
+        return;
+      }
+
+      if (data === 'toggle_ban') {
+        settings.useGlobalBan = !settings.useGlobalBan;
+        persistSettings();
+        await ctx.answerCallbackQuery({ text: '联合封禁已' + (settings.useGlobalBan ? '开启' : '关闭') });
+        try {
+          await ctx.editMessageText(buildPanelText(settings), { reply_markup: buildPanelKeyboard(settings) });
+        } catch (e) { }
+      } else if (data === 'toggle_captcha') {
+        settings.useCaptcha = !settings.useCaptcha;
+        persistSettings();
+        await ctx.answerCallbackQuery({ text: '人机验证已' + (settings.useCaptcha ? '开启' : '关闭') });
+        try {
+          await ctx.editMessageText(buildPanelText(settings), { reply_markup: buildPanelKeyboard(settings) });
+        } catch (e) { }
+      } else if (data === 'show_broadcast') {
+        await ctx.answerCallbackQuery({
+          text: '发送 /mybroadcast 加消息内容即可广播，例如：/mybroadcast 大家好',
+          show_alert: true
+        });
+      }
     });
 
     bot.catch(function (err) {
@@ -323,8 +410,7 @@ class BotManager {
   }
 
   async wakeBot(botId) {
-    const inst = this.instances.get(botId);
-    if (inst) return;
+    if (this.instances.has(botId)) return;
     const data = Store.listBots().find(function (b) { return b.bot_id === botId; });
     if (!data) return;
     console.log('[@' + data.username + '] 检测到新消息，自动唤醒');
@@ -375,44 +461,28 @@ class BotManager {
     Store.removeBot(botId);
   }
 
+  async broadcastToUsers(botToken, userIds, message) {
+    const bot = new Bot(botToken, { client: { apiRoot: API_ROOT } });
+    let success = 0, failed = 0;
+    for (let i = 0; i < userIds.length; i++) {
+      try {
+        await bot.api.sendMessage(userIds[i], message);
+        success++;
+      } catch (e) {
+        failed++;
+      }
+      if (i % BROADCAST_RATE_LIMIT === BROADCAST_RATE_LIMIT - 1) {
+        await new Promise(function (resolve) { setTimeout(resolve, 1000); });
+      }
+    }
+    return { success: success, failed: failed };
+  }
+
   getStats() {
     return {
       running: this.instances.size,
-      sleeping: this.sleeping.size,
-      runningList: Array.from(this.instances.entries()).map(function (e) {
-        return { botId: e[0], username: e[1].username, lastActivity: e[1].lastActivity };
-      }),
-      sleepingList: Array.from(this.sleeping).map(function (botId) {
-        const d = Store.listBots().find(function (b) { return b.bot_id === botId; });
-        return { botId: botId, username: d ? d.username : 'unknown' };
-      })
+      sleeping: this.sleeping.size
     };
-  }
-}
-
-// ---------------- 面板发送 ----------------
-async function sendPanel(ctx, settings, isEdit) {
-  const banStatus = settings.useGlobalBan ? '✅' : '❌';
-  const captchaStatus = settings.useCaptcha ? '✅' : '❌';
-
-  const keyboard = new InlineKeyboard()
-    .text('🛡 联合封禁：' + banStatus, 'toggle_ban').row()
-    .text('🤖 人机验证：' + captchaStatus, 'toggle_captcha');
-
-  const text = '⚙️ Bot 设置面板
-
-' +
-    '🛡 联合封禁：' + (settings.useGlobalBan ? '✅ 已开启' : '❌ 已关闭') + '
-' +
-    '🤖 人机验证：' + (settings.useCaptcha ? '✅ 已开启' : '❌ 已关闭') + '
-
-' +
-    '点击下方按钮切换开关';
-
-  if (isEdit) {
-    try { await ctx.editMessageText(text, { reply_markup: keyboard }); } catch (e) { }
-  } else {
-    await ctx.reply(text, { reply_markup: keyboard });
   }
 }
 
@@ -481,41 +551,42 @@ async function main() {
 
   masterBot.command('start', async function (ctx) {
     if (isMasterAdmin(ctx)) {
-      await ctx.reply('🤖 TGBOT Master 管理面板
-
-开放功能（所有人可用）：
-/create <BotToken> - 一键创建你自己的双向私聊机器人
-
-管理员功能：
-/list - 查看所有 Bot
-/delete <botId> - 删除 Bot
-/sleep <botId> - 手动休眠 Bot
-/wake <botId> - 手动唤醒 Bot
-/ban <用户ID> - 联合封禁用户
-/unban <用户ID> - 解除封禁
-/banlist - 查看封禁列表
-/stats - 查看服务器状态');
+      await ctx.reply(
+        '🤖 TGBOT Master 管理面板\n\n' +
+        '开放功能（所有人可用）：\n' +
+        '/create <BotToken> - 一键创建你自己的双向私聊机器人\n\n' +
+        '管理员功能：\n' +
+        '/list - 查看所有 Bot\n' +
+        '/delete <botId> - 删除 Bot\n' +
+        '/sleep <botId> - 手动休眠 Bot\n' +
+        '/wake <botId> - 手动唤醒 Bot\n' +
+        '/ban <用户ID> - 联合封禁用户\n' +
+        '/unban <用户ID> - 解除封禁\n' +
+        '/banlist - 查看封禁列表\n' +
+        '/broadcast <消息> - 平台级广播\n' +
+        '/sendto <用户ID> <消息> - 发送给指定用户\n' +
+        '/stats - 查看服务器状态'
+      );
     } else {
-      await ctx.reply('👋 欢迎使用机器人托管平台！
-
-发送 /create 加上你的 Bot Token，即可一键创建属于你自己的双向私聊机器人。
-
-例如：
-/create 123456:ABCdef...
-
-Token 可以在 @BotFather 处免费申请。');
+      await ctx.reply(
+        '👋 欢迎使用机器人托管平台！\n\n' +
+        '发送 /create 加上你的 Bot Token，即可一键创建属于你自己的双向私聊机器人。\n\n' +
+        '例如：\n/create 123456:ABCdef...\n\n' +
+        'Token 可以在 @BotFather 处免费申请。'
+      );
     }
   });
 
   masterBot.command('create', async function (ctx) {
     const token = ctx.match ? ctx.match.trim() : '';
     if (!token || token.indexOf(':') === -1) {
-      await ctx.reply('⚠️ 用法：/create <BotToken>
-例如：/create 123456:ABCdef...');
+      await ctx.reply('⚠️ 用法：/create <BotToken>\n例如：/create 123456:ABCdef...');
       return;
     }
 
-    const myBots = Store.listBots().filter(function (b) { return b.owner_id === ctx.from.id.toString(); });
+    const myBots = Store.listBots().filter(function (b) {
+      return b.owner_id === ctx.from.id.toString();
+    });
     if (myBots.length >= 3) {
       await ctx.reply('⚠️ 每人最多创建 3 个机器人，你已达上限。');
       return;
@@ -528,18 +599,18 @@ Token 可以在 @BotFather 处免费申请。');
     await ctx.reply('🔄 正在验证 Token 并创建机器人，请稍候...');
     try {
       const result = await manager.createBot(token, ctx.from.id.toString());
-      await ctx.reply('🎉 机器人创建成功！
-
-🤖 @' + result.username + '（ID: ' + result.botId + '）
-
-接下来请完成配置：
-1. 创建一个超级群组，并在群设置中开启「话题」功能
-2. 将 @' + result.username + ' 拉入群组并设为管理员
-3. 私聊 @' + result.username + ' 发送：/setchat 群ID
-   （群 ID 以 -100 开头）
-4. 私聊 @' + result.username + ' 发送 /panel 可设置联合封禁和人机验证
-
-完成后，任何人私聊你的机器人，消息都会出现在群组对应的话题里。');
+      await ctx.reply(
+        '🎉 机器人创建成功！\n\n' +
+        '🤖 @' + result.username + '（ID: ' + result.botId + '）\n\n' +
+        '接下来请完成配置：\n' +
+        '1. 创建一个超级群组，并在群设置中开启「话题」功能\n' +
+        '2. 将 @' + result.username + ' 拉入群组并设为管理员\n' +
+        '3. 私聊 @' + result.username + ' 发送：/setchat 群ID\n' +
+        '   （群 ID 以 -100 开头）\n' +
+        '4. 私聊 @' + result.username + ' 发送 /panel 可设置联合封禁和人机验证\n' +
+        '5. 发送 /mybroadcast <消息> 可广播给你的用户\n\n' +
+        '完成后，任何人私聊你的机器人，消息都会出现在群组对应的话题里。'
+      );
     } catch (error) {
       await ctx.reply('❌ 创建失败：' + error.message);
     }
@@ -552,17 +623,13 @@ Token 可以在 @BotFather 处免费申请。');
       await ctx.reply('📭 尚未创建任何 Bot');
       return;
     }
-    let msg = '📋 已创建的 Bot（共 ' + bots.length + ' 个）：
-
-';
+    let msg = '📋 已创建的 Bot（共 ' + bots.length + ' 个）：\n\n';
     for (let i = 0; i < bots.length; i++) {
       const b = bots[i];
-      msg += '🤖 @' + b.username + '
-  ID: ' + b.bot_id + '
-  创建者: ' + b.owner_id + '
-  创建时间: ' + b.created_at + '
-
-';
+      msg += '🤖 @' + b.username + '\n';
+      msg += '  ID: ' + b.bot_id + '\n';
+      msg += '  创建者: ' + b.owner_id + '\n';
+      msg += '  创建时间: ' + b.created_at + '\n\n';
     }
     await ctx.reply(msg);
   });
@@ -604,7 +671,6 @@ Token 可以在 @BotFather 处免费申请。');
     await ctx.reply('⏰ Bot ' + botId + ' 已唤醒');
   });
 
-  // ---- 联合封禁管理 ----
   masterBot.command('ban', async function (ctx) {
     if (!isMasterAdmin(ctx)) return;
     const userId = ctx.match ? ctx.match.trim() : '';
@@ -613,8 +679,7 @@ Token 可以在 @BotFather 处免费申请。');
       return;
     }
     Store.addToBanlist(userId);
-    await ctx.reply('🚫 用户 ' + userId + ' 已加入联合封禁列表
-所有开启了联合封禁的 Bot 将不再接收此用户的消息。');
+    await ctx.reply('🚫 用户 ' + userId + ' 已加入联合封禁列表\n所有开启了联合封禁的 Bot 将不再接收此用户的消息。');
   });
 
   masterBot.command('unban', async function (ctx) {
@@ -635,14 +700,96 @@ Token 可以在 @BotFather 处免费申请。');
       await ctx.reply('📭 封禁列表为空');
       return;
     }
-    let msg = '🚫 联合封禁列表（共 ' + banlist.length + ' 人）：
-
-';
+    let msg = '🚫 联合封禁列表（共 ' + banlist.length + ' 人）：\n\n';
     for (let i = 0; i < banlist.length; i++) {
-      msg += '• ' + banlist[i] + '
-';
+      msg += '• ' + banlist[i] + '\n';
     }
     await ctx.reply(msg);
+  });
+
+  masterBot.command('broadcast', async function (ctx) {
+    if (!isMasterAdmin(ctx)) return;
+    const message = ctx.match ? ctx.match.trim() : '';
+    if (!message) {
+      await ctx.reply('⚠️ 用法：/broadcast <消息内容>\n例如：/broadcast 平台将于今晚 10 点维护。');
+      return;
+    }
+
+    const bots = Store.listBots();
+    if (bots.length === 0) {
+      await ctx.reply('📭 尚未创建任何 Bot，无法广播。');
+      return;
+    }
+
+    await ctx.reply('🔄 开始平台级广播，覆盖 ' + bots.length + ' 个 Bot，请稍候...');
+
+    let totalSuccess = 0, totalFailed = 0, totalSkipped = 0;
+    const banlist = Store.getBanlist();
+
+    for (let i = 0; i < bots.length; i++) {
+      const botData = bots[i];
+      const users = Store.getUsersForBot(botData.bot_id);
+      if (users.length === 0) continue;
+
+      const settings = Store.getBotSettings(botData.bot_id);
+      const filteredUsers = users.filter(function (userId) {
+        if (settings.useGlobalBan && banlist.indexOf(userId) !== -1) {
+          totalSkipped++;
+          return false;
+        }
+        return true;
+      });
+      if (filteredUsers.length === 0) continue;
+
+      try {
+        const result = await manager.broadcastToUsers(botData.token, filteredUsers, message);
+        totalSuccess += result.success;
+        totalFailed += result.failed;
+      } catch (e) {
+        console.error('[@' + botData.username + '] 广播失败: ' + e.message);
+        totalFailed += filteredUsers.length;
+      }
+    }
+
+    await ctx.reply('✅ 平台级广播完成\n\n📤 成功: ' + totalSuccess + '\n❌ 失败: ' + totalFailed + '\n⏭ 跳过(已封禁): ' + totalSkipped);
+  });
+
+  masterBot.command('sendto', async function (ctx) {
+    if (!isMasterAdmin(ctx)) return;
+    const args = ctx.match ? ctx.match.trim() : '';
+    const parts = args.split(/\s+/);
+    if (parts.length < 2) {
+      await ctx.reply('⚠️ 用法：/sendto <用户ID> <消息>\n例如：/sendto 123456789 你好');
+      return;
+    }
+    const userId = parts[0];
+    const message = parts.slice(1).join(' ');
+
+    const bots = Store.listBots();
+    let targetBot = null;
+    for (let i = 0; i < bots.length; i++) {
+      const users = Store.getUsersForBot(bots[i].bot_id);
+      if (users.indexOf(userId) !== -1) {
+        targetBot = bots[i];
+        break;
+      }
+    }
+
+    if (!targetBot) {
+      await ctx.reply('❌ 未找到该用户，或该用户从未给任何 Bot 发过消息。');
+      return;
+    }
+
+    try {
+      const result = await manager.broadcastToUsers(targetBot.token, [userId], message);
+      if (result.success > 0) {
+        await ctx.reply('✅ 已通过 @' + targetBot.username + ' 发送给用户 ' + userId);
+      } else {
+        await ctx.reply('❌ 发送失败，用户可能已屏蔽 Bot。');
+      }
+    } catch (e) {
+      await ctx.reply('❌ 发送失败: ' + e.message);
+    }
   });
 
   masterBot.command('stats', async function (ctx) {
@@ -650,14 +797,15 @@ Token 可以在 @BotFather 处免费申请。');
     const stats = manager.getStats();
     const mem = process.memoryUsage();
     const cpu = process.cpuUsage();
-    await ctx.reply('📊 服务器状态
-
-🟢 运行中 Bot: ' + stats.running + ' 个
-💤 休眠中 Bot: ' + stats.sleeping + ' 个
-🚫 联合封禁: ' + Store.getBanlist().length + ' 人
-💾 内存占用: ' + (mem.rss / 1024 / 1024).toFixed(1) + ' MB
-🖥 CPU 用户时间: ' + (cpu.user / 1000000).toFixed(2) + ' s
-🖥 CPU 系统时间: ' + (cpu.system / 1000000).toFixed(2) + ' s');
+    await ctx.reply(
+      '📊 服务器状态\n\n' +
+      '🟢 运行中 Bot: ' + stats.running + ' 个\n' +
+      '💤 休眠中 Bot: ' + stats.sleeping + ' 个\n' +
+      '🚫 联合封禁: ' + Store.getBanlist().length + ' 人\n' +
+      '💾 内存占用: ' + (mem.rss / 1024 / 1024).toFixed(1) + ' MB\n' +
+      '🖥 CPU 用户时间: ' + (cpu.user / 1000000).toFixed(2) + ' s\n' +
+      '🖥 CPU 系统时间: ' + (cpu.system / 1000000).toFixed(2) + ' s'
+    );
   });
 
   masterBot.catch(function (err) {
