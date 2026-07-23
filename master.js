@@ -3,8 +3,8 @@ const fs = require('fs');
 const path = require('path');
 
 // ========== 配置区（在服务器上用 sed 修改，不要提交真实值）==========
-const MASTER_TOKEN = 'PASTE_YOUR_MASTER_BOT_TOKEN_HERE';
-const ADMIN_ID = 'PASTE_YOUR_TELEGRAM_USER_ID_HERE';
+const MASTER_TOKEN = '8999546677:AAH2SEcne9yC0R4zsWmg4B_91pT5MkdExVI';
+const ADMIN_ID = '7027439863';
 const API_ROOT = 'https://bot.143259.xyz';
 // ===================================================================
 
