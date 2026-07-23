@@ -106,18 +106,20 @@ const Store = {
 function buildPanelText(settings) {
   const banLine = settings.useGlobalBan ? '✅ 已开启' : '❌ 已关闭';
   const captchaLine = settings.useCaptcha ? '✅ 已开启' : '❌ 已关闭';
-  return '⚙️ Bot 设置面板\n\n' +
-    '🛡 联合封禁：' + banLine + '\n' +
-    '🤖 人机验证：' + captchaLine + '\n\n' +
-    '点击下方按钮切换开关';
+  return `⚙️ Bot 设置面板
+
+🛡 联合封禁：${banLine}
+🤖 人机验证：${captchaLine}
+
+点击下方按钮切换开关`;
 }
 
 function buildPanelKeyboard(settings) {
   const banStatus = settings.useGlobalBan ? '✅' : '❌';
   const captchaStatus = settings.useCaptcha ? '✅' : '❌';
   return new InlineKeyboard()
-    .text('🛡 联合封禁：' + banStatus, 'toggle_ban').row()
-    .text('🤖 人机验证：' + captchaStatus, 'toggle_captcha').row()
+    .text(`🛡 联合封禁：${banStatus}`, 'toggle_ban').row()
+    .text(`🤖 人机验证：${captchaStatus}`, 'toggle_captcha').row()
     .text('📢 广播用法', 'show_broadcast');
 }
 
@@ -136,32 +138,32 @@ class BotManager {
     const botId = me.id.toString();
     const username = me.username;
 
-    if (this.instances.has(botId)) throw new Error('Bot @' + username + ' 已在运行中');
+    if (this.instances.has(botId)) throw new Error(`Bot @${username} 已在运行中`);
     this.sleeping.delete(botId);
 
     const bot = new Bot(token, { client: { apiRoot: API_ROOT } });
     this.registerHandlers(bot, botId, ownerId);
 
     const instance = {
-      bot: bot, username: username, token: token,
-      ownerId: ownerId, lastActivity: Date.now(), idleTimer: null
+      bot, username, token, ownerId,
+      lastActivity: Date.now(), idleTimer: null
     };
 
     bot.start({
       timeout: POLL_TIMEOUT,
-      onStart: function () { console.log('[@' + username + '] long polling started'); }
+      onStart: () => console.log(`[@${username}] long polling started`)
     });
 
     this.instances.set(botId, instance);
     this.resetIdleTimer(botId);
 
     Store.addBot({
-      bot_id: botId, username: username, token: token,
-      owner_id: ownerId, created_at: new Date().toISOString(), status: 'running'
+      bot_id: botId, username, token, owner_id: ownerId,
+      created_at: new Date().toISOString(), status: 'running'
     });
     this.startDaemonTasks();
 
-    return { botId: botId, username: username };
+    return { botId, username };
   }
 
   registerHandlers(bot, botId, ownerId) {
@@ -171,7 +173,7 @@ class BotManager {
 
     function persistKV() {
       const obj = {};
-      kv.forEach(function (value, key) { obj[key] = value; });
+      kv.forEach((value, key) => { obj[key] = value; });
       Store.setKV(botId, obj);
     }
 
@@ -183,8 +185,8 @@ class BotManager {
       return ctx.from && ctx.from.id.toString() === ownerId;
     }
 
-    // 活动追踪中间件
-    bot.use(async function (ctx, next) {
+    // 活动追踪
+    bot.use(async (ctx, next) => {
       const inst = self.instances.get(botId);
       if (inst) {
         inst.lastActivity = Date.now();
@@ -193,69 +195,66 @@ class BotManager {
       await next();
     });
 
-    bot.command('start', async function (ctx) {
+    bot.command('start', async (ctx) => {
       if (ctx.chat.type !== 'private') return;
       if (isAdmin(ctx)) {
-        await ctx.reply(
-          '✅ 双向私聊机器人已启动\n\n' +
-          '管理命令：\n' +
-          '/setchat <群ID> - 设置话题群\n' +
-          '/topicgroup - 查看话题群\n' +
-          '/cleartopicgroup - 清除话题群\n' +
-          '/panel - 打开设置面板\n' +
-          '/mybroadcast <消息> - 广播给你的所有用户'
-        );
+        await ctx.reply(`✅ 双向私聊机器人已启动
+
+管理命令：
+/setchat <群ID> - 设置话题群
+/topicgroup - 查看话题群
+/cleartopicgroup - 清除话题群
+/panel - 打开设置面板
+/mybroadcast <消息> - 广播给你的所有用户`);
       } else {
         const tg = kv.get('topic_group');
-        if (tg) {
-          await ctx.reply('👋 欢迎！直接发送消息即可联系管理员。');
-        } else {
-          await ctx.reply('👋 欢迎！机器人尚未配置完毕，请联系管理员。');
-        }
+        await ctx.reply(tg ? '👋 欢迎！直接发送消息即可联系管理员。' : '👋 欢迎！机器人尚未配置完毕，请联系管理员。');
       }
     });
 
-    bot.command('panel', async function (ctx) {
+    bot.command('panel', async (ctx) => {
       if (!isAdmin(ctx)) return;
       if (ctx.chat.type !== 'private') return;
       await ctx.reply(buildPanelText(settings), { reply_markup: buildPanelKeyboard(settings) });
     });
 
-    bot.command('setchat', async function (ctx) {
+    bot.command('setchat', async (ctx) => {
       if (!isAdmin(ctx)) return;
       const groupId = ctx.match ? ctx.match.trim() : '';
       if (!groupId || groupId.indexOf('-100') !== 0) {
-        await ctx.reply('⚠️ 用法：/setchat -100xxxxxxxxx\n群 ID 必须以 -100 开头，且群已开启话题功能。');
+        await ctx.reply(`⚠️ 用法：/setchat -100xxxxxxxxx
+群 ID 必须以 -100 开头，且群已开启话题功能。`);
         return;
       }
       kv.set('topic_group', groupId);
       persistKV();
-      await ctx.reply('✅ 话题群已设置为：' + groupId);
+      await ctx.reply(`✅ 话题群已设置为：${groupId}`);
     });
 
-    bot.command('topicgroup', async function (ctx) {
+    bot.command('topicgroup', async (ctx) => {
       if (!isAdmin(ctx)) return;
       const g = kv.get('topic_group');
-      await ctx.reply(g ? '📋 当前话题群 ID：' + g : '⚠️ 尚未设置话题群');
+      await ctx.reply(g ? `📋 当前话题群 ID：${g}` : '⚠️ 尚未设置话题群');
     });
 
-    bot.command('cleartopicgroup', async function (ctx) {
+    bot.command('cleartopicgroup', async (ctx) => {
       if (!isAdmin(ctx)) return;
       kv.delete('topic_group');
       persistKV();
       await ctx.reply('✅ 话题群设置已清除');
     });
 
-    bot.command('mybroadcast', async function (ctx) {
+    bot.command('mybroadcast', async (ctx) => {
       if (!isAdmin(ctx)) return;
       const message = ctx.match ? ctx.match.trim() : '';
       if (!message) {
-        await ctx.reply('⚠️ 用法：/mybroadcast <消息内容>\n例如：/mybroadcast 今晚 8 点系统维护，请知悉。');
+        await ctx.reply(`⚠️ 用法：/mybroadcast <消息内容>
+例如：/mybroadcast 今晚 8 点系统维护，请知悉。`);
         return;
       }
 
       const users = [];
-      kv.forEach(function (value, key) {
+      kv.forEach((value, key) => {
         if (key.indexOf('user:') === 0) users.push(key.replace('user:', ''));
       });
 
@@ -264,7 +263,7 @@ class BotManager {
         return;
       }
 
-      await ctx.reply('🔄 开始广播给 ' + users.length + ' 个用户，请稍候...');
+      await ctx.reply(`🔄 开始广播给 ${users.length} 个用户，请稍候...`);
 
       let success = 0, failed = 0, skipped = 0;
       const banlist = Store.getBanlist();
@@ -282,57 +281,62 @@ class BotManager {
           failed++;
         }
         if (i % BROADCAST_RATE_LIMIT === BROADCAST_RATE_LIMIT - 1) {
-          await new Promise(function (resolve) { setTimeout(resolve, 1000); });
+          await new Promise(resolve => setTimeout(resolve, 1000));
         }
       }
 
-      await ctx.reply('✅ 广播完成\n\n📤 成功: ' + success + '\n❌ 失败: ' + failed + '\n⏭ 跳过(已封禁): ' + skipped);
+      await ctx.reply(`✅ 广播完成
+
+📤 成功: ${success}
+❌ 失败: ${failed}
+⏭ 跳过(已封禁): ${skipped}`);
     });
 
     // 消息转发
-    bot.on('message', async function (ctx) {
+    bot.on('message', async (ctx) => {
       const msg = ctx.message;
       if (!ctx.from) return;
       const fromId = ctx.from.id.toString();
       if (msg.text && msg.text.indexOf('/') === 0) return;
 
-      // 联合封禁检查
+      // 联合封禁
       if (settings.useGlobalBan && Store.getBanlist().indexOf(fromId) !== -1) {
-        console.log('[' + botId + '] 已拦截封禁用户 ' + fromId);
+        console.log(`[${botId}] 已拦截封禁用户 ${fromId}`);
         return;
       }
 
-      // 管理员在话题群回复 → 转发给用户
+      // 管理员在话题群回复
       if (isAdmin(ctx) && ctx.chat.type === 'supergroup' && msg.message_thread_id) {
         const topicId = msg.message_thread_id.toString();
-        const userChatId = kv.get('topic:' + topicId);
+        const userChatId = kv.get(`topic:${topicId}`);
         if (userChatId) await forwardMessage(bot, userChatId, msg);
         return;
       }
 
-      // 用户私聊 → 人机验证 → 转发到话题群
+      // 用户私聊
       if (ctx.chat.type === 'private' && !isAdmin(ctx)) {
         const topicGroup = kv.get('topic_group');
         if (!topicGroup) return;
 
+        // 人机验证
         if (settings.useCaptcha && settings.verifiedUsers.indexOf(fromId) === -1) {
           const keyboard = new InlineKeyboard().text('✅ 我不是机器人', 'captcha_verify');
           await ctx.reply('请完成人机验证后才能发送消息：', { reply_markup: keyboard });
           return;
         }
 
-        let topicId = kv.get('user:' + fromId);
+        let topicId = kv.get(`user:${fromId}`);
         if (!topicId) {
-          const senderName = ((ctx.from.first_name || '') + ' ' + (ctx.from.last_name || '')).trim();
-          const topicTitle = fromId + ' (' + senderName + ')';
+          const senderName = `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim();
+          const topicTitle = `${fromId} (${senderName})`;
           try {
             const result = await bot.api.createForumTopic(parseInt(topicGroup, 10), topicTitle);
             topicId = result.message_thread_id.toString();
-            kv.set('user:' + fromId, topicId);
-            kv.set('topic:' + topicId, fromId);
+            kv.set(`user:${fromId}`, topicId);
+            kv.set(`topic:${topicId}`, fromId);
             persistKV();
           } catch (e) {
-            console.error('[' + botId + '] 创建话题失败: ' + (e.message || e));
+            console.error(`[${botId}] 创建话题失败: ${e.message || e}`);
             return;
           }
         }
@@ -340,11 +344,11 @@ class BotManager {
       }
     });
 
-    // 所有按钮回调统一处理（合并为一个，避免中间件互相拦截）
-    bot.on('callback_query:data', async function (ctx) {
+    // 所有按钮回调统一处理
+    bot.on('callback_query:data', async (ctx) => {
       const data = ctx.callbackQuery.data;
 
-      // 人机验证按钮（任何用户可点）
+      // 人机验证按钮
       if (data === 'captcha_verify') {
         const fromId = ctx.from.id.toString();
         if (settings.verifiedUsers.indexOf(fromId) === -1) {
@@ -358,7 +362,7 @@ class BotManager {
         return;
       }
 
-      // 面板按钮（仅创建者可点）
+      // 面板按钮（仅创建者）
       if (!isAdmin(ctx)) {
         await ctx.answerCallbackQuery({ text: '只有机器人管理员可以操作', show_alert: true });
         return;
@@ -367,14 +371,14 @@ class BotManager {
       if (data === 'toggle_ban') {
         settings.useGlobalBan = !settings.useGlobalBan;
         persistSettings();
-        await ctx.answerCallbackQuery({ text: '联合封禁已' + (settings.useGlobalBan ? '开启' : '关闭') });
+        await ctx.answerCallbackQuery({ text: `联合封禁已${settings.useGlobalBan ? '开启' : '关闭'}` });
         try {
           await ctx.editMessageText(buildPanelText(settings), { reply_markup: buildPanelKeyboard(settings) });
         } catch (e) { }
       } else if (data === 'toggle_captcha') {
         settings.useCaptcha = !settings.useCaptcha;
         persistSettings();
-        await ctx.answerCallbackQuery({ text: '人机验证已' + (settings.useCaptcha ? '开启' : '关闭') });
+        await ctx.answerCallbackQuery({ text: `人机验证已${settings.useCaptcha ? '开启' : '关闭'}` });
         try {
           await ctx.editMessageText(buildPanelText(settings), { reply_markup: buildPanelKeyboard(settings) });
         } catch (e) { }
@@ -386,8 +390,8 @@ class BotManager {
       }
     });
 
-    bot.catch(function (err) {
-      console.error('[' + botId + '] 运行错误: ' + (err.message || err));
+    bot.catch((err) => {
+      console.error(`[${botId}] 运行错误: ${err.message || err}`);
     });
   }
 
@@ -396,14 +400,13 @@ class BotManager {
     const inst = this.instances.get(botId);
     if (!inst) return;
     if (inst.idleTimer) clearTimeout(inst.idleTimer);
-    const self = this;
-    inst.idleTimer = setTimeout(function () { self.sleepBot(botId); }, IDLE_TIMEOUT_MS);
+    inst.idleTimer = setTimeout(() => this.sleepBot(botId), IDLE_TIMEOUT_MS);
   }
 
   async sleepBot(botId) {
     const inst = this.instances.get(botId);
     if (!inst) return;
-    console.log('[@' + inst.username + '] 闲置超时，进入休眠');
+    console.log(`[@${inst.username}] 闲置超时，进入休眠`);
     try { await inst.bot.stop(); } catch (e) { }
     this.instances.delete(botId);
     this.sleeping.add(botId);
@@ -411,39 +414,38 @@ class BotManager {
 
   async wakeBot(botId) {
     if (this.instances.has(botId)) return;
-    const data = Store.listBots().find(function (b) { return b.bot_id === botId; });
+    const data = Store.listBots().find(b => b.bot_id === botId);
     if (!data) return;
-    console.log('[@' + data.username + '] 检测到新消息，自动唤醒');
+    console.log(`[@${data.username}] 检测到新消息，自动唤醒`);
     try {
       await this.createBot(data.token, data.owner_id);
       this.sleeping.delete(botId);
     } catch (e) {
-      console.error('[@' + data.username + '] 唤醒失败: ' + e.message);
+      console.error(`[@${data.username}] 唤醒失败: ${e.message}`);
     }
   }
 
   startDaemonTasks() {
-    const self = this;
     if (!this.idleCheckTimer) {
-      this.idleCheckTimer = setInterval(function () {
+      this.idleCheckTimer = setInterval(() => {
         const now = Date.now();
-        self.instances.forEach(function (inst, botId) {
-          if (now - inst.lastActivity > IDLE_TIMEOUT_MS) self.sleepBot(botId);
+        this.instances.forEach((inst, botId) => {
+          if (now - inst.lastActivity > IDLE_TIMEOUT_MS) this.sleepBot(botId);
         });
       }, 60 * 1000);
     }
     if (!this.wakeupTimer) {
-      this.wakeupTimer = setInterval(async function () {
-        if (self.sleeping.size === 0) return;
-        for (const botId of self.sleeping) {
-          const data = Store.listBots().find(function (b) { return b.bot_id === botId; });
-          if (!data) { self.sleeping.delete(botId); continue; }
+      this.wakeupTimer = setInterval(async () => {
+        if (this.sleeping.size === 0) return;
+        for (const botId of this.sleeping) {
+          const data = Store.listBots().find(b => b.bot_id === botId);
+          if (!data) { this.sleeping.delete(botId); continue; }
           try {
             const testBot = new Bot(data.token, { client: { apiRoot: API_ROOT } });
             const updates = await testBot.api.getUpdates({ timeout: 0, limit: 1 });
-            if (updates && updates.length > 0) await self.wakeBot(botId);
+            if (updates && updates.length > 0) await this.wakeBot(botId);
           } catch (e) {
-            console.error('[@' + data.username + '] 探测失败: ' + e.message);
+            console.error(`[@${data.username}] 探测失败: ${e.message}`);
           }
         }
       }, WAKEUP_INTERVAL_MS);
@@ -472,10 +474,10 @@ class BotManager {
         failed++;
       }
       if (i % BROADCAST_RATE_LIMIT === BROADCAST_RATE_LIMIT - 1) {
-        await new Promise(function (resolve) { setTimeout(resolve, 1000); });
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
-    return { success: success, failed: failed };
+    return { success, failed };
   }
 
   getStats() {
@@ -532,14 +534,13 @@ async function main() {
   const manager = new BotManager();
 
   const existing = Store.listBots();
-  console.log('正在恢复 ' + existing.length + ' 个已有 Bot...');
-  for (let i = 0; i < existing.length; i++) {
-    const r = existing[i];
+  console.log(`正在恢复 ${existing.length} 个已有 Bot...`);
+  for (const r of existing) {
     try {
       await manager.createBot(r.token, r.owner_id);
-      console.log('  ✅ @' + r.username + ' 已恢复');
+      console.log(`  ✅ @${r.username} 已恢复`);
     } catch (e) {
-      console.error('  ❌ @' + r.username + ' 恢复失败: ' + e.message);
+      console.error(`  ❌ @${r.username} 恢复失败: ${e.message}`);
     }
   }
 
@@ -549,44 +550,45 @@ async function main() {
     return ctx.from && ctx.from.id.toString() === ADMIN_ID;
   }
 
-  masterBot.command('start', async function (ctx) {
+  masterBot.command('start', async (ctx) => {
     if (isMasterAdmin(ctx)) {
-      await ctx.reply(
-        '🤖 TGBOT Master 管理面板\n\n' +
-        '开放功能（所有人可用）：\n' +
-        '/create <BotToken> - 一键创建你自己的双向私聊机器人\n\n' +
-        '管理员功能：\n' +
-        '/list - 查看所有 Bot\n' +
-        '/delete <botId> - 删除 Bot\n' +
-        '/sleep <botId> - 手动休眠 Bot\n' +
-        '/wake <botId> - 手动唤醒 Bot\n' +
-        '/ban <用户ID> - 联合封禁用户\n' +
-        '/unban <用户ID> - 解除封禁\n' +
-        '/banlist - 查看封禁列表\n' +
-        '/broadcast <消息> - 平台级广播\n' +
-        '/sendto <用户ID> <消息> - 发送给指定用户\n' +
-        '/stats - 查看服务器状态'
-      );
+      await ctx.reply(`🤖 TGBOT Master 管理面板
+
+开放功能（所有人可用）：
+/create <BotToken> - 一键创建你自己的双向私聊机器人
+
+管理员功能：
+/list - 查看所有 Bot
+/delete <botId> - 删除 Bot
+/sleep <botId> - 手动休眠 Bot
+/wake <botId> - 手动唤醒 Bot
+/ban <用户ID> - 联合封禁用户
+/unban <用户ID> - 解除封禁
+/banlist - 查看封禁列表
+/broadcast <消息> - 平台级广播
+/sendto <用户ID> <消息> - 发送给指定用户
+/stats - 查看服务器状态`);
     } else {
-      await ctx.reply(
-        '👋 欢迎使用机器人托管平台！\n\n' +
-        '发送 /create 加上你的 Bot Token，即可一键创建属于你自己的双向私聊机器人。\n\n' +
-        '例如：\n/create 123456:ABCdef...\n\n' +
-        'Token 可以在 @BotFather 处免费申请。'
-      );
+      await ctx.reply(`👋 欢迎使用机器人托管平台！
+
+发送 /create 加上你的 Bot Token，即可一键创建属于你自己的双向私聊机器人。
+
+例如：
+/create 123456:ABCdef...
+
+Token 可以在 @BotFather 处免费申请。`);
     }
   });
 
-  masterBot.command('create', async function (ctx) {
+  masterBot.command('create', async (ctx) => {
     const token = ctx.match ? ctx.match.trim() : '';
     if (!token || token.indexOf(':') === -1) {
-      await ctx.reply('⚠️ 用法：/create <BotToken>\n例如：/create 123456:ABCdef...');
+      await ctx.reply(`⚠️ 用法：/create <BotToken>
+例如：/create 123456:ABCdef...`);
       return;
     }
 
-    const myBots = Store.listBots().filter(function (b) {
-      return b.owner_id === ctx.from.id.toString();
-    });
+    const myBots = Store.listBots().filter(b => b.owner_id === ctx.from.id.toString());
     if (myBots.length >= 3) {
       await ctx.reply('⚠️ 每人最多创建 3 个机器人，你已达上限。');
       return;
@@ -599,42 +601,46 @@ async function main() {
     await ctx.reply('🔄 正在验证 Token 并创建机器人，请稍候...');
     try {
       const result = await manager.createBot(token, ctx.from.id.toString());
-      await ctx.reply(
-        '🎉 机器人创建成功！\n\n' +
-        '🤖 @' + result.username + '（ID: ' + result.botId + '）\n\n' +
-        '接下来请完成配置：\n' +
-        '1. 创建一个超级群组，并在群设置中开启「话题」功能\n' +
-        '2. 将 @' + result.username + ' 拉入群组并设为管理员\n' +
-        '3. 私聊 @' + result.username + ' 发送：/setchat 群ID\n' +
-        '   （群 ID 以 -100 开头）\n' +
-        '4. 私聊 @' + result.username + ' 发送 /panel 可设置联合封禁和人机验证\n' +
-        '5. 发送 /mybroadcast <消息> 可广播给你的用户\n\n' +
-        '完成后，任何人私聊你的机器人，消息都会出现在群组对应的话题里。'
-      );
+      await ctx.reply(`🎉 机器人创建成功！
+
+🤖 @${result.username}（ID: ${result.botId}）
+
+接下来请完成配置：
+1. 创建一个超级群组，并在群设置中开启「话题」功能
+2. 将 @${result.username} 拉入群组并设为管理员
+3. 私聊 @${result.username} 发送：/setchat 群ID
+   （群 ID 以 -100 开头）
+4. 私聊 @${result.username} 发送 /panel 可设置联合封禁和人机验证
+5. 发送 /mybroadcast <消息> 可广播给你的用户
+
+完成后，任何人私聊你的机器人，消息都会出现在群组对应的话题里。`);
     } catch (error) {
-      await ctx.reply('❌ 创建失败：' + error.message);
+      await ctx.reply(`❌ 创建失败：${error.message}`);
     }
   });
 
-  masterBot.command('list', async function (ctx) {
+  masterBot.command('list', async (ctx) => {
     if (!isMasterAdmin(ctx)) return;
     const bots = Store.listBots();
     if (bots.length === 0) {
       await ctx.reply('📭 尚未创建任何 Bot');
       return;
     }
-    let msg = '📋 已创建的 Bot（共 ' + bots.length + ' 个）：\n\n';
-    for (let i = 0; i < bots.length; i++) {
-      const b = bots[i];
-      msg += '🤖 @' + b.username + '\n';
-      msg += '  ID: ' + b.bot_id + '\n';
-      msg += '  创建者: ' + b.owner_id + '\n';
-      msg += '  创建时间: ' + b.created_at + '\n\n';
+    let msg = `📋 已创建的 Bot（共 ${bots.length} 个）：
+
+`;
+    for (const b of bots) {
+      msg += `🤖 @${b.username}
+  ID: ${b.bot_id}
+  创建者: ${b.owner_id}
+  创建时间: ${b.created_at}
+
+`;
     }
     await ctx.reply(msg);
   });
 
-  masterBot.command('delete', async function (ctx) {
+  masterBot.command('delete', async (ctx) => {
     if (!isMasterAdmin(ctx)) return;
     const botId = ctx.match ? ctx.match.trim() : '';
     if (!botId) {
@@ -643,13 +649,13 @@ async function main() {
     }
     try {
       await manager.deleteBot(botId);
-      await ctx.reply('✅ Bot ' + botId + ' 已停止并删除');
+      await ctx.reply(`✅ Bot ${botId} 已停止并删除`);
     } catch (error) {
-      await ctx.reply('❌ 删除失败: ' + error.message);
+      await ctx.reply(`❌ 删除失败: ${error.message}`);
     }
   });
 
-  masterBot.command('sleep', async function (ctx) {
+  masterBot.command('sleep', async (ctx) => {
     if (!isMasterAdmin(ctx)) return;
     const botId = ctx.match ? ctx.match.trim() : '';
     if (!botId) {
@@ -657,10 +663,10 @@ async function main() {
       return;
     }
     await manager.sleepBot(botId);
-    await ctx.reply('💤 Bot ' + botId + ' 已休眠，下次有消息时自动唤醒');
+    await ctx.reply(`💤 Bot ${botId} 已休眠，下次有消息时自动唤醒`);
   });
 
-  masterBot.command('wake', async function (ctx) {
+  masterBot.command('wake', async (ctx) => {
     if (!isMasterAdmin(ctx)) return;
     const botId = ctx.match ? ctx.match.trim() : '';
     if (!botId) {
@@ -668,10 +674,10 @@ async function main() {
       return;
     }
     await manager.wakeBot(botId);
-    await ctx.reply('⏰ Bot ' + botId + ' 已唤醒');
+    await ctx.reply(`⏰ Bot ${botId} 已唤醒`);
   });
 
-  masterBot.command('ban', async function (ctx) {
+  masterBot.command('ban', async (ctx) => {
     if (!isMasterAdmin(ctx)) return;
     const userId = ctx.match ? ctx.match.trim() : '';
     if (!userId) {
@@ -679,10 +685,11 @@ async function main() {
       return;
     }
     Store.addToBanlist(userId);
-    await ctx.reply('🚫 用户 ' + userId + ' 已加入联合封禁列表\n所有开启了联合封禁的 Bot 将不再接收此用户的消息。');
+    await ctx.reply(`🚫 用户 ${userId} 已加入联合封禁列表
+所有开启了联合封禁的 Bot 将不再接收此用户的消息。`);
   });
 
-  masterBot.command('unban', async function (ctx) {
+  masterBot.command('unban', async (ctx) => {
     if (!isMasterAdmin(ctx)) return;
     const userId = ctx.match ? ctx.match.trim() : '';
     if (!userId) {
@@ -690,28 +697,32 @@ async function main() {
       return;
     }
     Store.removeFromBanlist(userId);
-    await ctx.reply('✅ 用户 ' + userId + ' 已从联合封禁列表移除');
+    await ctx.reply(`✅ 用户 ${userId} 已从联合封禁列表移除`);
   });
 
-  masterBot.command('banlist', async function (ctx) {
+  masterBot.command('banlist', async (ctx) => {
     if (!isMasterAdmin(ctx)) return;
     const banlist = Store.getBanlist();
     if (banlist.length === 0) {
       await ctx.reply('📭 封禁列表为空');
       return;
     }
-    let msg = '🚫 联合封禁列表（共 ' + banlist.length + ' 人）：\n\n';
-    for (let i = 0; i < banlist.length; i++) {
-      msg += '• ' + banlist[i] + '\n';
+    let msg = `🚫 联合封禁列表（共 ${banlist.length} 人）：
+
+`;
+    for (const id of banlist) {
+      msg += `• ${id}
+`;
     }
     await ctx.reply(msg);
   });
 
-  masterBot.command('broadcast', async function (ctx) {
+  masterBot.command('broadcast', async (ctx) => {
     if (!isMasterAdmin(ctx)) return;
     const message = ctx.match ? ctx.match.trim() : '';
     if (!message) {
-      await ctx.reply('⚠️ 用法：/broadcast <消息内容>\n例如：/broadcast 平台将于今晚 10 点维护。');
+      await ctx.reply(`⚠️ 用法：/broadcast <消息内容>
+例如：/broadcast 平台将于今晚 10 点维护。`);
       return;
     }
 
@@ -721,18 +732,17 @@ async function main() {
       return;
     }
 
-    await ctx.reply('🔄 开始平台级广播，覆盖 ' + bots.length + ' 个 Bot，请稍候...');
+    await ctx.reply(`🔄 开始平台级广播，覆盖 ${bots.length} 个 Bot，请稍候...`);
 
     let totalSuccess = 0, totalFailed = 0, totalSkipped = 0;
     const banlist = Store.getBanlist();
 
-    for (let i = 0; i < bots.length; i++) {
-      const botData = bots[i];
+    for (const botData of bots) {
       const users = Store.getUsersForBot(botData.bot_id);
       if (users.length === 0) continue;
 
       const settings = Store.getBotSettings(botData.bot_id);
-      const filteredUsers = users.filter(function (userId) {
+      const filteredUsers = users.filter(userId => {
         if (settings.useGlobalBan && banlist.indexOf(userId) !== -1) {
           totalSkipped++;
           return false;
@@ -746,20 +756,25 @@ async function main() {
         totalSuccess += result.success;
         totalFailed += result.failed;
       } catch (e) {
-        console.error('[@' + botData.username + '] 广播失败: ' + e.message);
+        console.error(`[@${botData.username}] 广播失败: ${e.message}`);
         totalFailed += filteredUsers.length;
       }
     }
 
-    await ctx.reply('✅ 平台级广播完成\n\n📤 成功: ' + totalSuccess + '\n❌ 失败: ' + totalFailed + '\n⏭ 跳过(已封禁): ' + totalSkipped);
+    await ctx.reply(`✅ 平台级广播完成
+
+📤 成功: ${totalSuccess}
+❌ 失败: ${totalFailed}
+⏭ 跳过(已封禁): ${totalSkipped}`);
   });
 
-  masterBot.command('sendto', async function (ctx) {
+  masterBot.command('sendto', async (ctx) => {
     if (!isMasterAdmin(ctx)) return;
     const args = ctx.match ? ctx.match.trim() : '';
     const parts = args.split(/\s+/);
     if (parts.length < 2) {
-      await ctx.reply('⚠️ 用法：/sendto <用户ID> <消息>\n例如：/sendto 123456789 你好');
+      await ctx.reply(`⚠️ 用法：/sendto <用户ID> <消息>
+例如：/sendto 123456789 你好`);
       return;
     }
     const userId = parts[0];
@@ -767,10 +782,10 @@ async function main() {
 
     const bots = Store.listBots();
     let targetBot = null;
-    for (let i = 0; i < bots.length; i++) {
-      const users = Store.getUsersForBot(bots[i].bot_id);
+    for (const b of bots) {
+      const users = Store.getUsersForBot(b.bot_id);
       if (users.indexOf(userId) !== -1) {
-        targetBot = bots[i];
+        targetBot = b;
         break;
       }
     }
@@ -783,40 +798,39 @@ async function main() {
     try {
       const result = await manager.broadcastToUsers(targetBot.token, [userId], message);
       if (result.success > 0) {
-        await ctx.reply('✅ 已通过 @' + targetBot.username + ' 发送给用户 ' + userId);
+        await ctx.reply(`✅ 已通过 @${targetBot.username} 发送给用户 ${userId}`);
       } else {
         await ctx.reply('❌ 发送失败，用户可能已屏蔽 Bot。');
       }
     } catch (e) {
-      await ctx.reply('❌ 发送失败: ' + e.message);
+      await ctx.reply(`❌ 发送失败: ${e.message}`);
     }
   });
 
-  masterBot.command('stats', async function (ctx) {
+  masterBot.command('stats', async (ctx) => {
     if (!isMasterAdmin(ctx)) return;
     const stats = manager.getStats();
     const mem = process.memoryUsage();
     const cpu = process.cpuUsage();
-    await ctx.reply(
-      '📊 服务器状态\n\n' +
-      '🟢 运行中 Bot: ' + stats.running + ' 个\n' +
-      '💤 休眠中 Bot: ' + stats.sleeping + ' 个\n' +
-      '🚫 联合封禁: ' + Store.getBanlist().length + ' 人\n' +
-      '💾 内存占用: ' + (mem.rss / 1024 / 1024).toFixed(1) + ' MB\n' +
-      '🖥 CPU 用户时间: ' + (cpu.user / 1000000).toFixed(2) + ' s\n' +
-      '🖥 CPU 系统时间: ' + (cpu.system / 1000000).toFixed(2) + ' s'
-    );
+    await ctx.reply(`📊 服务器状态
+
+🟢 运行中 Bot: ${stats.running} 个
+💤 休眠中 Bot: ${stats.sleeping} 个
+🚫 联合封禁: ${Store.getBanlist().length} 人
+💾 内存占用: ${(mem.rss / 1024 / 1024).toFixed(1)} MB
+🖥 CPU 用户时间: ${(cpu.user / 1000000).toFixed(2)} s
+🖥 CPU 系统时间: ${(cpu.system / 1000000).toFixed(2)} s`);
   });
 
-  masterBot.catch(function (err) {
-    console.error('[master] 运行错误: ' + (err.message || err));
+  masterBot.catch((err) => {
+    console.error(`[master] 运行错误: ${err.message || err}`);
   });
 
   masterBot.start();
   console.log('✅ TGBOT Master 已启动');
 }
 
-main().catch(function (e) {
+main().catch((e) => {
   console.error('启动失败:', e);
   process.exit(1);
 });
