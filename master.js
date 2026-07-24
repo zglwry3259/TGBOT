@@ -4,7 +4,7 @@ const Store = require('./store');
 // ========== 配置区（下载后在服务器上修改，勿提交真实值）==========
 const MASTER_TOKEN = 'PASTE_YOUR_MASTER_BOT_TOKEN_HERE';
 const ADMIN_ID = 'PASTE_YOUR_TELEGRAM_USER_ID_HERE';
-const API_ROOT = 'https://bot.143259.xyz';
+const API_ROOT = 'https://tg.143259.xyz';
 const WEB_PORT = 3000;
 const WEB_PASSWORD = 'PASTE_YOUR_WEB_PASSWORD_HERE';
 // ==============================================================
